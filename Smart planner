@@ -1,0 +1,119 @@
+"""
+AI Smart Planning System - prototype
+-------------------------------------
+1. ML model 1 (TF-IDF + Logistic Regression): predicts task PRIORITY from text
+2. ML model 2 (TF-IDF + Ridge Regression):    predicts task DURATION (minutes)
+3. Genetic Algorithm: searches for the best task ORDER for the day
+   (high-priority tasks early, deadlines respected, breaks added)
+
+Run:  python smart_planner.py
+Needs: pip install scikit-learn numpy
+"""
+import random
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.pipeline import make_pipeline
+
+# ---------- 1. Training data (text, priority 3=high..1=low, minutes) ----------
+DATA = [
+    ("finish project report for manager", 3, 120), ("submit assignment before deadline", 3, 90),
+    ("prepare client presentation", 3, 90), ("fix urgent production bug", 3, 60),
+    ("study for exam tomorrow", 3, 120), ("pay electricity bill today", 3, 10),
+    ("reply to important emails", 2, 30), ("team meeting", 2, 45),
+    ("review code of teammate", 2, 40), ("plan weekly budget", 2, 30),
+    ("call dentist for appointment", 2, 10), ("buy groceries", 2, 45),
+    ("go to gym workout", 2, 60), ("clean the room", 1, 30),
+    ("read a novel chapter", 1, 30), ("watch tutorial video", 1, 40),
+    ("organize photos", 1, 45), ("browse social media", 1, 15),
+    ("learn new hobby guitar practice", 1, 40), ("water the plants", 1, 10),
+]
+texts = [d[0] for d in DATA]
+prio_model = make_pipeline(TfidfVectorizer(ngram_range=(1, 2)), LogisticRegression(max_iter=1000))
+dur_model = make_pipeline(TfidfVectorizer(ngram_range=(1, 2)), Ridge(alpha=0.5))
+prio_model.fit(texts, [d[1] for d in DATA])
+dur_model.fit(texts, [d[2] for d in DATA])
+
+def analyze(task):
+    """AI step: predict priority + duration for a free-text task."""
+    p = int(prio_model.predict([task])[0])
+    d = int(round(max(5, dur_model.predict([task])[0]) / 5) * 5)
+    return {"name": task, "priority": p, "minutes": d}
+
+# ---------- 2. Genetic algorithm scheduler ----------
+BREAK = 10  # minutes between tasks
+
+def fitness(order, tasks, day_len):
+    t, score = 0, 0.0
+    for i in order:
+        k = tasks[i]
+        if t + k["minutes"] > day_len:          # doesn't fit -> penalty
+            score -= 15 * k["priority"]
+            continue
+        # reward: high priority early (energy is highest in the morning)
+        earliness = 1 - t / day_len
+        score += k["priority"] ** 2 * (0.5 + earliness)
+        if k.get("deadline") is not None and t + k["minutes"] > k["deadline"]:
+            score -= 20 * k["priority"]          # missed deadline
+        t += k["minutes"] + BREAK
+    return score
+
+def evolve(tasks, day_len, pop=60, gens=150, mut=0.2, seed=1):
+    rng = random.Random(seed)
+    n = len(tasks)
+    popn = [rng.sample(range(n), n) for _ in range(pop)]
+    for _ in range(gens):
+        popn.sort(key=lambda o: fitness(o, tasks, day_len), reverse=True)
+        nxt = popn[:pop // 5]                    # elitism
+        while len(nxt) < pop:
+            a, b = rng.sample(popn[:pop // 2], 2)
+            cut = rng.randrange(1, n) if n > 1 else 0
+            child = a[:cut] + [g for g in b if g not in a[:cut]]  # order crossover
+            if rng.random() < mut and n > 1:
+                i, j = rng.sample(range(n), 2)
+                child[i], child[j] = child[j], child[i]
+            nxt.append(child)
+        popn = nxt
+    return max(popn, key=lambda o: fitness(o, tasks, day_len))
+
+# ---------- 3. Full pipeline ----------
+def plan_day(raw_tasks, start="09:00", end="17:30", deadlines=None):
+    deadlines = deadlines or {}
+    h, m = map(int, start.split(":")); s = h * 60 + m
+    h, m = map(int, end.split(":")); day_len = h * 60 + m - s
+    tasks = []
+    for r in raw_tasks:
+        k = analyze(r)
+        if r in deadlines:
+            dh, dm = map(int, deadlines[r].split(":"))
+            k["deadline"] = dh * 60 + dm - s
+        tasks.append(k)
+    order = evolve(tasks, day_len)
+    t, out, dropped = 0, [], []
+    for i in order:
+        k = tasks[i]
+        if t + k["minutes"] > day_len:
+            dropped.append(k["name"]); continue
+        a, b = s + t, s + t + k["minutes"]
+        out.append((f"{a//60:02d}:{a%60:02d}", f"{b//60:02d}:{b%60:02d}", k))
+        t += k["minutes"] + BREAK
+    return out, dropped
+
+if __name__ == "__main__":
+    tasks = [
+        "finish quarterly report for manager",
+        "reply to important emails",
+        "go to gym workout",
+        "prepare client presentation",
+        "call dentist for appointment",
+        "read a novel chapter",
+        "organize photos",
+        "study for exam tomorrow",
+    ]
+    schedule, dropped = plan_day(tasks, deadlines={"prepare client presentation": "13:00"})
+    label = {3: "HIGH", 2: "MED ", 1: "LOW "}
+    print("\n=== AI Smart Plan ===")
+    for a, b, k in schedule:
+        print(f"{a}-{b}  [{label[k['priority']]}] {k['name']} ({k['minutes']} min)")
+    if dropped:
+        print("\nNot enough time today:", ", ".join(dropped))
